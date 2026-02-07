@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
+  Handle,
+  Position,
   addEdge,
   applyEdgeChanges,
   applyNodeChanges,
@@ -33,6 +35,12 @@ import {
   Image as ImageIcon,
   BookMarked,
   BarChart3,
+  Check,
+  ClipboardList,
+  FolderTree,
+  Lightbulb,
+  MessageSquare,
+  RefreshCcw,
 } from "lucide-react";
 
 // -----------------------------------------------------------------------------
@@ -51,7 +59,7 @@ const SIDES = ["Attack", "Defense"];
 const MAPS_SHEET = ["Haven", "Ascent", "Abyss", "Sunset", "Corrode", "Bind", "Lotus"];
 const MAPS_COMPS = ["Haven", "Pearl", "Abyss", "Sunset", "Corrode", "Bind", "Split"];
 
-const STORAGE_KEY = "valorant_playbook_v3";
+const STORAGE_KEY = "valorant_playbook_v4";
 
 const AGENTS = [
   "Astra",
@@ -91,6 +99,13 @@ function safeJsonParse(str) {
   } catch {
     return null;
   }
+}
+
+function normalizeUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
 }
 
 // -----------------------------------------------------------------------------
@@ -145,7 +160,7 @@ function seedDictionary() {
 // Seed: Playbook graph
 // -----------------------------------------------------------------------------
 function seedGraph(map, side) {
-  const base = { nodes: [], edges: [], plays: [] };
+  const base = { nodes: [], edges: [], plays: [], revisions: [] };
 
   const addPlay = (p) => base.plays.push({ id: uid(), ...p });
 
@@ -434,8 +449,12 @@ function seedInitialState() {
   });
 
   return {
-    version: 3,
+    version: 4,
     settings: { activeTeamId: teams[0].id, quickGlance: true, showReferencePanel: true, embedUrl: "" },
+    resources: { videos: [], strategyLinks: [], lineups: [], clips: [] },
+    homework: [],
+    tips: [],
+    readiness: {},
     teams,
     playbooks,
     dictionary: seedDictionary(),
@@ -450,11 +469,20 @@ function normalizeState(saved) {
 
   st.version = st.version || 1;
   st.settings = st.settings || {};
+  st.resources = st.resources || { videos: [], strategyLinks: [], lineups: [], clips: [] };
+  st.homework = Array.isArray(st.homework) ? st.homework : [];
+  st.tips = Array.isArray(st.tips) ? st.tips : [];
+  st.readiness = st.readiness || {};
   if (typeof st.settings.quickGlance !== "boolean") st.settings.quickGlance = true;
   if (typeof st.settings.showReferencePanel !== "boolean") st.settings.showReferencePanel = true;
   if (typeof st.settings.embedUrl !== "string") st.settings.embedUrl = "";
 
   st.teams = st.teams || [];
+
+  st.resources.videos = Array.isArray(st.resources.videos) ? st.resources.videos : [];
+  st.resources.strategyLinks = Array.isArray(st.resources.strategyLinks) ? st.resources.strategyLinks : [];
+  st.resources.lineups = Array.isArray(st.resources.lineups) ? st.resources.lineups : [];
+  st.resources.clips = Array.isArray(st.resources.clips) ? st.resources.clips : [];
   st.playbooks = st.playbooks || {};
 
   if (!st.dictionary || !Array.isArray(st.dictionary.entries)) st.dictionary = seedDictionary();
@@ -468,10 +496,12 @@ function normalizeState(saved) {
       st.playbooks[t.id][m] = st.playbooks[t.id][m] || {};
       SIDES.forEach((s) => {
         if (!st.playbooks[t.id][m][s]) st.playbooks[t.id][m][s] = seedGraph(m, s);
+        if (!Array.isArray(st.playbooks[t.id][m][s].revisions)) st.playbooks[t.id][m][s].revisions = [];
       });
     });
 
     if (!st.roster[t.id]) st.roster[t.id] = seedRosterForTeam(t.players || []);
+    if (!st.readiness[t.id]) st.readiness[t.id] = { statusByMapSide: {}, updatedAt: "" };
     if (!st.starts[t.id]) st.starts[t.id] = seedStartsFromScreenshot();
 
     const teamPlayers = t.players || [];
@@ -491,7 +521,24 @@ function normalizeState(saved) {
     MAPS.forEach((m) => (r.comps[m] = r.comps[m] || {}));
   });
 
-  st.version = 3;
+  st.teams.forEach((t) => {
+    MAPS.forEach((m) => {
+      SIDES.forEach((s) => {
+        const g = st.playbooks?.[t.id]?.[m]?.[s];
+        if (!g) return;
+        g.nodes = (g.nodes || []).map((n) => ({
+          ...n,
+          data: {
+            ...n.data,
+            videoUrl: n.data?.videoUrl || "",
+            strategyUrl: n.data?.strategyUrl || "",
+          },
+        }));
+      });
+    });
+  });
+
+  st.version = 4;
   return st;
 }
 
@@ -546,15 +593,18 @@ const KIND_STYLE = {
 };
 
 function PlayNode({ data, selected }) {
-  const { kind, label, detail, tags, tempo, image } = data;
+  const { kind, label, detail, tags, tempo, image, videoUrl, strategyUrl } = data;
   return (
     <div
       className={
-        "min-w-[220px] max-w-[280px] rounded-xl border p-3 shadow-sm " +
+        "relative min-w-[220px] max-w-[280px] rounded-xl border p-3 shadow-sm " +
         (KIND_STYLE[kind] || KIND_STYLE.note) +
         (selected ? " ring-2 ring-white/30" : "")
       }
     >
+      <Handle type="target" position={Position.Left} className="!bg-zinc-200 !w-2.5 !h-2.5" />
+      <Handle type="source" position={Position.Right} className="!bg-zinc-200 !w-2.5 !h-2.5" />
+
       {image ? (
         <div className="mb-2 overflow-hidden rounded-lg border border-zinc-800">
           <img src={image} alt="node" className="w-full h-28 object-cover" />
@@ -571,6 +621,16 @@ function PlayNode({ data, selected }) {
           <Pill key={t}>{t}</Pill>
         ))}
       </div>
+      {(videoUrl || strategyUrl) ? (
+        <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+          {videoUrl ? (
+            <a href={videoUrl} target="_blank" rel="noreferrer" className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800">Video</a>
+          ) : null}
+          {strategyUrl ? (
+            <a href={strategyUrl} target="_blank" rel="noreferrer" className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800">Strategy</a>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mt-2 text-[10px] uppercase tracking-wide text-zinc-400">{kind}</div>
     </div>
   );
@@ -590,6 +650,7 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
   const [edges, setEdges] = useState(graph?.edges || []);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [search, setSearch] = useState("");
+  const [revisionNote, setRevisionNote] = useState("");
 
   useEffect(() => {
     setNodes(graph?.nodes || []);
@@ -601,6 +662,9 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
   }, [teamId, map, side]);
 
   const selected = useMemo(() => nodes.find((n) => n.id === selectedNodeId) || null, [nodes, selectedNodeId]);
+  const revisions = graph?.revisions || [];
+  const mapSideKey = `${map}__${side}`;
+  const readyStatus = state.readiness?.[teamId]?.statusByMapSide?.[mapSideKey];
 
   const filteredPlays = useMemo(() => {
     const plays = graph?.plays || [];
@@ -616,7 +680,8 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
 
   const onNodesChange = (changes) => setNodes((nds) => applyNodeChanges(changes, nds));
   const onEdgesChange = (changes) => setEdges((eds) => applyEdgeChanges(changes, eds));
-  const onConnect = (params) => setEdges((eds) => addEdge({ ...params, style: { strokeWidth: 2 } }, eds));
+  const onConnect = (params) =>
+    setEdges((eds) => addEdge({ ...params, animated: true, label: "link", style: { strokeWidth: 2 } }, eds));
 
   const persist = (nextNodes, nextEdges, nextPlays) => {
     setState((prev) => {
@@ -647,6 +712,8 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
         tempo: "MED",
         triggers: [],
         image: "",
+        videoUrl: "",
+        strategyUrl: "",
       },
     };
     const nextNodes = [...nodes, n];
@@ -695,6 +762,45 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
     reader.readAsDataURL(file);
   };
 
+  const saveRevision = () => {
+    setState((prev) => {
+      const copy = structuredClone(prev);
+      const g = copy.playbooks[teamId][map][side];
+      g.revisions = g.revisions || [];
+      g.revisions.unshift({
+        id: uid(),
+        at: new Date().toISOString(),
+        note: revisionNote.trim() || `Snapshot ${new Date().toLocaleString()}`,
+        nodes,
+        edges,
+      });
+      if (g.revisions.length > 15) g.revisions = g.revisions.slice(0, 15);
+      return copy;
+    });
+    setRevisionNote("");
+  };
+
+  const loadRevision = (revisionId) => {
+    const rev = (graph?.revisions || []).find((r) => r.id === revisionId);
+    if (!rev) return;
+    setNodes(rev.nodes || []);
+    setEdges(rev.edges || []);
+    persist(rev.nodes || [], rev.edges || [], null);
+  };
+
+  const markReadyForPractice = () => {
+    setState((prev) => {
+      const copy = structuredClone(prev);
+      if (!copy.readiness[teamId]) copy.readiness[teamId] = { statusByMapSide: {}, updatedAt: "" };
+      copy.readiness[teamId].statusByMapSide[mapSideKey] = {
+        ready: true,
+        at: new Date().toISOString(),
+      };
+      copy.readiness[teamId].updatedAt = new Date().toISOString();
+      return copy;
+    });
+  };
+
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-4 h-[calc(100vh-160px)]">
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950 overflow-hidden">
@@ -737,6 +843,20 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
             >
               <Trash2 size={14} />
             </button>
+            <button
+              className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
+              onClick={saveRevision}
+              title="Save revision"
+            >
+              <span className="inline-flex items-center gap-1"><RefreshCcw size={14} /> Snapshot</span>
+            </button>
+            <button
+              className="rounded-lg border border-emerald-800 bg-emerald-950/60 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-900/60"
+              onClick={markReadyForPractice}
+              title="Ready for practice"
+            >
+              <span className="inline-flex items-center gap-1"><Check size={14} /> Ready</span>
+            </button>
           </div>
         </div>
 
@@ -748,6 +868,8 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             nodeTypes={nodeTypes}
+            nodesConnectable
+            elementsSelectable
             fitView
             onNodeClick={(_, node) => setSelectedNodeId(node.id)}
             proOptions={{ hideAttribution: true }}
@@ -803,6 +925,27 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white"
                 />
               </label>
+
+              <div className="grid grid-cols-1 gap-2">
+                <label className="block">
+                  <div className="text-xs text-zinc-300">Pro VOD / video link</div>
+                  <input
+                    value={selected.data.videoUrl || ""}
+                    onChange={(e) => updateSelected({ videoUrl: normalizeUrl(e.target.value) })}
+                    placeholder="https://youtube.com/..."
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white"
+                  />
+                </label>
+                <label className="block">
+                  <div className="text-xs text-zinc-300">Strategy hyperlink</div>
+                  <input
+                    value={selected.data.strategyUrl || ""}
+                    onChange={(e) => updateSelected({ strategyUrl: normalizeUrl(e.target.value) })}
+                    placeholder="https://docs.google.com/..."
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white"
+                  />
+                </label>
+              </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <label className="block">
@@ -877,6 +1020,39 @@ function FlowEditor({ state, setState, teamId, map, side, quickGlance }) {
           ) : (
             <div className="mt-2 text-sm text-zinc-300">Click a box to edit.</div>
           )}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-900/30 p-3">
+          <div className="text-xs uppercase tracking-wide text-zinc-400">Revision checks</div>
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              value={revisionNote}
+              onChange={(e) => setRevisionNote(e.target.value)}
+              placeholder="Snapshot note"
+              className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white"
+            />
+            <button
+              onClick={saveRevision}
+              className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-white hover:bg-zinc-800"
+            >
+              Save
+            </button>
+          </div>
+          <div className="mt-2 space-y-1 max-h-28 overflow-auto">
+            {revisions.slice(0, 8).map((r) => (
+              <button
+                key={r.id}
+                onClick={() => loadRevision(r.id)}
+                className="w-full text-left rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+              >
+                {new Date(r.at).toLocaleString()} — {r.note}
+              </button>
+            ))}
+            {!revisions.length ? <div className="text-xs text-zinc-400">No revisions yet.</div> : null}
+          </div>
+          <div className="mt-3 rounded-lg border border-emerald-800/60 bg-emerald-950/40 p-2 text-xs text-emerald-200">
+            {readyStatus?.ready ? `Ready for practice ✓ (${new Date(readyStatus.at).toLocaleString()})` : "Not marked ready for practice yet."}
+          </div>
         </div>
 
         <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-900/30 p-3">
@@ -1399,6 +1575,175 @@ function RosterPage({ state, setState, teamId }) {
   );
 }
 
+
+function ResourceListEditor({ title, items, onAdd, onRemove, placeholderName = "Title", placeholderUrl = "URL" }) {
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  return (
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+      <div className="text-sm font-semibold text-white">{title}</div>
+      <div className="mt-2 flex gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={placeholderName} className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white" />
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={placeholderUrl} className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white" />
+        <button
+          onClick={() => {
+            if (!name.trim() || !url.trim()) return;
+            onAdd({ id: uid(), name: name.trim(), url: normalizeUrl(url) });
+            setName("");
+            setUrl("");
+          }}
+          className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-white hover:bg-zinc-800"
+        >
+          Add
+        </button>
+      </div>
+      <div className="mt-3 space-y-2">
+        {items.map((item) => (
+          <div key={item.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2">
+            <a href={item.url} target="_blank" rel="noreferrer" className="text-sm text-sky-300 hover:underline">{item.name}</a>
+            <button onClick={() => onRemove(item.id)} className="text-xs text-zinc-300 hover:text-white">Remove</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StrategyPage({ state, setState }) {
+  const links = state.resources?.strategyLinks || [];
+  const videos = state.resources?.videos || [];
+
+  const mutate = (key, fn) => {
+    setState((prev) => {
+      const copy = structuredClone(prev);
+      copy.resources[key] = fn(copy.resources[key] || []);
+      return copy;
+    });
+  };
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <ResourceListEditor
+        title="Strategy Links"
+        items={links}
+        placeholderName="Strat section"
+        placeholderUrl="https://..."
+        onAdd={(item) => mutate("strategyLinks", (arr) => [item, ...arr])}
+        onRemove={(id) => mutate("strategyLinks", (arr) => arr.filter((x) => x.id !== id))}
+      />
+      <ResourceListEditor
+        title="Pro VOD / Video Links"
+        items={videos}
+        placeholderName="Video title"
+        placeholderUrl="https://youtube.com/..."
+        onAdd={(item) => mutate("videos", (arr) => [item, ...arr])}
+        onRemove={(id) => mutate("videos", (arr) => arr.filter((x) => x.id !== id))}
+      />
+    </div>
+  );
+}
+
+function HomeworkPage({ state, setState, teamId }) {
+  const items = (state.homework || []).filter((h) => h.teamId === teamId);
+  const [text, setText] = useState("");
+  const [due, setDue] = useState("");
+
+  return (
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+      <div className="text-sm font-semibold text-white">Homework + TeamHQ reminders</div>
+      <div className="mt-2 flex gap-2">
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="What is due?" className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white" />
+        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white" />
+        <button
+          onClick={() => {
+            if (!text.trim()) return;
+            setState((prev) => ({ ...prev, homework: [{ id: uid(), teamId, text: text.trim(), due, done: false }, ...(prev.homework || [])] }));
+            setText("");
+            setDue("");
+          }}
+          className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-white hover:bg-zinc-800"
+        >
+          Add
+        </button>
+      </div>
+      <div className="mt-4 space-y-2">
+        {items.map((h) => (
+          <label key={h.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2">
+            <span className={"text-sm " + (h.done ? "text-zinc-500 line-through" : "text-zinc-200")}>{h.text} {h.due ? `(${h.due})` : ""}</span>
+            <input
+              type="checkbox"
+              checked={!!h.done}
+              onChange={(e) => setState((prev) => ({ ...prev, homework: prev.homework.map((x) => (x.id === h.id ? { ...x, done: e.target.checked } : x)) }))}
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AnonymousTipsPage({ state, setState, teamId }) {
+  const [message, setMessage] = useState("");
+  const [schoolFlag, setSchoolFlag] = useState(false);
+  const tips = (state.tips || []).filter((t) => t.teamId === teamId);
+  return (
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+      <div className="text-sm font-semibold text-white">Anonymous Tips Jar</div>
+      <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={4} className="mt-3 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white" placeholder="Share criticism or feedback anonymously" />
+      <label className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
+        <input type="checkbox" checked={schoolFlag} onChange={(e) => setSchoolFlag(e.target.checked)} />
+        Request more time for school work (private flag)
+      </label>
+      <button
+        onClick={() => {
+          if (!message.trim()) return;
+          setState((prev) => ({ ...prev, tips: [{ id: uid(), teamId, message: message.trim(), schoolFlag, createdAt: new Date().toISOString() }, ...(prev.tips || [])] }));
+          setMessage("");
+          setSchoolFlag(false);
+        }}
+        className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-white hover:bg-zinc-800"
+      >
+        Submit anonymously
+      </button>
+      <div className="mt-4 space-y-2">
+        {tips.map((t) => (
+          <div key={t.id} className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-sm text-zinc-200">
+            <div>{t.message}</div>
+            {t.schoolFlag ? <div className="mt-1 text-amber-300 text-xs">Needs extra school-work time</div> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LineupsClipsPage({ state, setState }) {
+  const lineups = state.resources?.lineups || [];
+  const clips = state.resources?.clips || [];
+  const mutate = (key, fn) => setState((prev) => ({ ...prev, resources: { ...prev.resources, [key]: fn(prev.resources?.[key] || []) } }));
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <ResourceListEditor
+        title="Lineups Channel (folders via prefix e.g. Ascent/A site)"
+        items={lineups}
+        placeholderName="Folder/Lineup"
+        placeholderUrl="https://..."
+        onAdd={(item) => mutate("lineups", (arr) => [item, ...arr])}
+        onRemove={(id) => mutate("lineups", (arr) => arr.filter((x) => x.id !== id))}
+      />
+      <ResourceListEditor
+        title="Clips & Cool Plays"
+        items={clips}
+        placeholderName="Clip title"
+        placeholderUrl="https://..."
+        onAdd={(item) => mutate("clips", (arr) => [item, ...arr])}
+        onRemove={(id) => mutate("clips", (arr) => arr.filter((x) => x.id !== id))}
+      />
+    </div>
+  );
+}
+
 // -----------------------------------------------------------------------------
 // References & Integrations
 // -----------------------------------------------------------------------------
@@ -1566,7 +1911,7 @@ export default function App() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="text-lg font-semibold">Team Playbook — Preview</div>
-              <div className="text-sm text-zinc-400">Flowchart + trigger dictionary + roster tracking.</div>
+              <div className="text-sm text-zinc-400">Flowchart + strategy links + team operations hub.</div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -1625,6 +1970,10 @@ export default function App() {
 
             <div className="ml-auto flex items-center gap-2">
               <IconTab active={tab === "Playbook"} icon={Network} label="Playbook" onClick={() => setTab("Playbook")} />
+              <IconTab active={tab === "Strategy"} icon={Lightbulb} label="Strategy" onClick={() => setTab("Strategy")} />
+              <IconTab active={tab === "Homework"} icon={ClipboardList} label="Homework" onClick={() => setTab("Homework")} />
+              <IconTab active={tab === "Tips"} icon={MessageSquare} label="Tips" onClick={() => setTab("Tips")} />
+              <IconTab active={tab === "Lineups/Clips"} icon={FolderTree} label="Lineups/Clips" onClick={() => setTab("Lineups/Clips")} />
               <IconTab active={tab === "Trigger Words"} icon={BookMarked} label="Trigger Words" onClick={() => setTab("Trigger Words")} />
               <IconTab active={tab === "Roster"} icon={BarChart3} label="Roster" onClick={() => setTab("Roster")} />
               <IconTab active={tab === "References"} icon={Layers} label="References" onClick={() => setTab("References")} />
@@ -1641,6 +1990,14 @@ export default function App() {
             <FlowEditor state={state} setState={setState} teamId={teamId} map={map} side={side} quickGlance={quickGlance} />
           </ReactFlowProvider>
         ) : null}
+
+        {tab === "Strategy" ? <StrategyPage state={state} setState={setState} /> : null}
+
+        {tab === "Homework" ? <HomeworkPage state={state} setState={setState} teamId={teamId} /> : null}
+
+        {tab === "Tips" ? <AnonymousTipsPage state={state} setState={setState} teamId={teamId} /> : null}
+
+        {tab === "Lineups/Clips" ? <LineupsClipsPage state={state} setState={setState} /> : null}
 
         {tab === "Trigger Words" ? <TriggerWordsPage state={state} setState={setState} /> : null}
 
@@ -1684,6 +2041,7 @@ function SettingsPanel({ state, setState }) {
 
       copy.roster[id] = seedRosterForTeam(newTeamPlayers);
       copy.starts[id] = seedStartsFromScreenshot();
+      copy.readiness[id] = { statusByMapSide: {}, updatedAt: "" };
 
       return copy;
     });
